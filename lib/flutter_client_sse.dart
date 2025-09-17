@@ -9,6 +9,7 @@ part 'sse_event_model.dart';
 /// A client for subscribing to Server-Sent Events (SSE).
 class SSEClient {
   static http.Client _client = new http.Client();
+  static StreamController<SSEModel> streamController = StreamController();
 
   /// Retry the SSE connection after a delay.
   ///
@@ -16,24 +17,21 @@ class SSEClient {
   /// [url] is the URL of the SSE endpoint.
   /// [header] is a map of request headers.
   /// [body] is an optional request body for POST requests.
-  /// [streamController] is required to persist the stream from the old connection
   static void _retryConnection(
       {required SSERequestType method,
-      required String url,
-      required Map<String, String> header,
-      required StreamController<SSEModel> streamController,
-      Map<String, dynamic>? body}) {
+        required String url,
+        required Map<String, String> header,
+        Map<String, dynamic>? body}) {
     print('---RETRY CONNECTION---');
-    if (!_streamController.isClosed)
-    Future.delayed(Duration(seconds: 5), () {
-      subscribeToSSE(
-        method: method,
-        url: url,
-        header: header,
-        body: body,
-        oldStreamController: streamController,
-      );
-    });
+    if (!streamController.isClosed)
+      Future.delayed(Duration(seconds: 5), () {
+        subscribeToSSE(
+          method: method,
+          url: url,
+          header: header,
+          body: body,
+        );
+      });
   }
 
   /// Subscribe to Server-Sent Events.
@@ -46,14 +44,9 @@ class SSEClient {
   /// Returns a [Stream] of [SSEModel] representing the SSE events.
   static Stream<SSEModel> subscribeToSSE(
       {required SSERequestType method,
-      required String url,
-      required Map<String, String> header,
-      StreamController<SSEModel>? oldStreamController,
-      Map<String, dynamic>? body}) {
-    StreamController<SSEModel> streamController = StreamController();
-    if (oldStreamController != null) {
-      streamController = oldStreamController;
-    }
+        required String url,
+        required Map<String, String> header,
+        Map<String, dynamic>? body}) {
     var lineRegex = RegExp(r'^([^:]*)(?::)?(?: )?(.*)?$');
     var currentSSEModel = SSEModel(data: '', id: '', event: '');
     print("--SUBSCRIBING TO SSE---");
@@ -82,7 +75,7 @@ class SSEClient {
           /// Applying transforms and listening to it
           data.stream
             ..transform(Utf8Decoder()).transform(LineSplitter()).listen(
-              (dataLine) {
+                  (dataLine) {
                 if (dataLine.isEmpty) {
                   /// This means that the complete event set has been read.
                   /// We then add the event to the stream
@@ -126,7 +119,6 @@ class SSEClient {
                       method: method,
                       url: url,
                       header: header,
-                      streamController: streamController,
                     );
                 }
               },
@@ -138,7 +130,6 @@ class SSEClient {
                   url: url,
                   header: header,
                   body: body,
-                  streamController: streamController,
                 );
               },
             );
@@ -150,7 +141,6 @@ class SSEClient {
             url: url,
             header: header,
             body: body,
-            streamController: streamController,
           );
         });
       } catch (e) {
@@ -161,7 +151,6 @@ class SSEClient {
           url: url,
           header: header,
           body: body,
-          streamController: streamController,
         );
       }
       return streamController.stream;
@@ -170,6 +159,7 @@ class SSEClient {
 
   /// Unsubscribe from the SSE.
   static void unsubscribeFromSSE() {
+    streamController.close();
     _client.close();
   }
 }
