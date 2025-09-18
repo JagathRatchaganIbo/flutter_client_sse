@@ -8,158 +8,156 @@ part 'sse_event_model.dart';
 
 /// A client for subscribing to Server-Sent Events (SSE).
 class SSEClient {
-  static http.Client _client = new http.Client();
-  static StreamController<SSEModel> streamController = StreamController();
+  static http.Client? _client;
+  static StreamController<SSEModel>? _controller;
+  static StreamSubscription<String>? _subscription;
 
-  /// Retry the SSE connection after a delay.
-  ///
-  /// [method] is the request method (GET or POST).
-  /// [url] is the URL of the SSE endpoint.
-  /// [header] is a map of request headers.
-  /// [body] is an optional request body for POST requests.
-  static void _retryConnection(
-      {required SSERequestType method,
-        required String url,
-        required Map<String, String> header,
-        Map<String, dynamic>? body}) {
-    print('---RETRY CONNECTION---');
-    if (!streamController.isClosed)
-      Future.delayed(Duration(seconds: 5), () {
-        subscribeToSSE(
-          method: method,
-          url: url,
-          header: header,
-          body: body,
-        );
-      });
+  static Stream<SSEModel> get stream {
+    _controller ??= StreamController<SSEModel>.broadcast(
+      onListen: () => print("SSE broadcast: listener added"),
+      onCancel: () {
+        print("SSE broadcast: listener removed");
+        if (!_controller!.hasListener) {
+          _controller?.close();
+          _controller = null;
+        }
+      },
+    );
+    return _controller!.stream;
   }
 
-  /// Subscribe to Server-Sent Events.
-  ///
-  /// [method] is the request method (GET or POST).
-  /// [url] is the URL of the SSE endpoint.
-  /// [header] is a map of request headers.
-  /// [body] is an optional request body for POST requests.
-  ///
-  /// Returns a [Stream] of [SSEModel] representing the SSE events.
-  static Stream<SSEModel> subscribeToSSE(
-      {required SSERequestType method,
-        required String url,
-        required Map<String, String> header,
-        Map<String, dynamic>? body}) {
+  static Stream<SSEModel> subscribeToSSE({
+    required SSERequestType method,
+    required String url,
+    required Map<String, String> header,
+    Map<String, dynamic>? body,
+  }) {
+    // Cleanup previous client if exists
+    _client?.close();
+    _client = http.Client();
+
+    // Only create controller if it doesn't exist
+    _controller ??= StreamController<SSEModel>.broadcast(
+      onListen: () => print("SSE broadcast: listener added"),
+      onCancel: () {
+        print("SSE broadcast: listener removed");
+        if (!_controller!.hasListener) {
+          _controller?.close();
+          _controller = null;
+        }
+      },
+    );
+
     var lineRegex = RegExp(r'^([^:]*)(?::)?(?: )?(.*)?$');
     var currentSSEModel = SSEModel(data: '', id: '', event: '');
-    print("--SUBSCRIBING TO SSE---");
-    while (true) {
-      try {
-        _client = http.Client();
-        var request = new http.Request(
-          method == SSERequestType.GET ? "GET" : "POST",
-          Uri.parse(url),
-        );
 
-        /// Adding headers to the request
-        header.forEach((key, value) {
-          request.headers[key] = value;
-        });
+    _listenSSE(method, url, header, body, lineRegex, currentSSEModel);
 
-        /// Adding body to the request if exists
-        if (body != null) {
-          request.body = jsonEncode(body);
-        }
+    return _controller!.stream;
+  }
 
-        Future<http.StreamedResponse> response = _client.send(request);
+  static void _listenSSE(
+      SSERequestType method,
+      String url,
+      Map<String, String> header,
+      Map<String, dynamic>? body,
+      RegExp lineRegex,
+      SSEModel currentSSEModel) async {
+    try {
+      var request = http.Request(
+        method == SSERequestType.GET ? "GET" : "POST",
+        Uri.parse(url),
+      );
 
-        /// Listening to the response as a stream
-        response.asStream().listen((data) {
-          /// Applying transforms and listening to it
-          data.stream
-            ..transform(Utf8Decoder()).transform(LineSplitter()).listen(
-                  (dataLine) {
-                if (dataLine.isEmpty) {
-                  /// This means that the complete event set has been read.
-                  /// We then add the event to the stream
-                  streamController.add(currentSSEModel);
-                  currentSSEModel = SSEModel(data: '', id: '', event: '');
-                  return;
-                }
+      header.forEach((key, value) {
+        request.headers[key] = value;
+      });
 
-                /// Get the match of each line through the regex
-                Match match = lineRegex.firstMatch(dataLine)!;
-                var field = match.group(1);
-                if (field!.isEmpty) {
-                  return;
-                }
-                var value = '';
-                if (field == 'data') {
-                  // If the field is data, we get the data through the substring
-                  value = dataLine.substring(
-                    5,
-                  );
-                } else {
-                  value = match.group(2) ?? '';
-                }
-                switch (field) {
-                  case 'event':
-                    currentSSEModel.event = value;
-                    break;
-                  case 'data':
-                    currentSSEModel.data =
-                        (currentSSEModel.data ?? '') + value + '\n';
-                    break;
-                  case 'id':
-                    currentSSEModel.id = value;
-                    break;
-                  case 'retry':
-                    break;
-                  default:
-                    print('---ERROR---');
-                    print(dataLine);
-                    _retryConnection(
-                      method: method,
-                      url: url,
-                      header: header,
-                    );
-                }
-              },
-              onError: (e, s) {
-                print('---ERROR---');
-                print(e);
-                _retryConnection(
-                  method: method,
-                  url: url,
-                  header: header,
-                  body: body,
-                );
-              },
-            );
-        }, onError: (e, s) {
-          print('---ERROR---');
-          print(e);
-          _retryConnection(
-            method: method,
-            url: url,
-            header: header,
-            body: body,
-          );
-        });
-      } catch (e) {
-        print('---ERROR---');
-        print(e);
-        _retryConnection(
-          method: method,
-          url: url,
-          header: header,
-          body: body,
-        );
+      if (body != null) {
+        request.body = jsonEncode(body);
       }
-      return streamController.stream;
+
+      var response = await _client!.send(request);
+
+      // Cancel old subscription if any
+      await _subscription?.cancel();
+
+      _subscription = response.stream
+          .transform(Utf8Decoder())
+          .transform(LineSplitter())
+          .listen((dataLine) {
+        if (dataLine.isEmpty) {
+          _controller?.add(currentSSEModel);
+          currentSSEModel = SSEModel(data: '', id: '', event: '');
+          return;
+        }
+        Match? match = lineRegex.firstMatch(dataLine);
+        if (match == null) return;
+
+        var field = match.group(1);
+        if (field == null || field.isEmpty) return;
+
+        var value = field == 'data'
+            ? dataLine.substring(5)
+            : (match.group(2) ?? '');
+
+        switch (field) {
+          case 'event':
+            currentSSEModel.event = value;
+            break;
+          case 'data':
+            currentSSEModel.data =
+                (currentSSEModel.data ?? '') + value + '\n';
+            break;
+          case 'id':
+            currentSSEModel.id = value;
+            break;
+          default:
+            print("---ERROR--- $dataLine");
+            _retryConnection(
+                method: method, url: url, header: header, body: body);
+        }
+      }, onError: (e, s) {
+        print("---ERROR--- $e");
+        _retryConnection(
+            method: method, url: url, header: header, body: body);
+      }, onDone: () {
+        print("---SSE DONE---");
+        _retryConnection(
+            method: method, url: url, header: header, body: body);
+      });
+    } catch (e) {
+      print("---ERROR--- $e");
+      _retryConnection(
+          method: method, url: url, header: header, body: body);
     }
   }
 
-  /// Unsubscribe from the SSE.
-  static void unsubscribeFromSSE() {
-    streamController.close();
-    _client.close();
+  static void _retryConnection({
+    required SSERequestType method,
+    required String url,
+    required Map<String, String> header,
+    Map<String, dynamic>? body,
+  }) {
+    print('---RETRY CONNECTION---');
+    Future.delayed(const Duration(seconds: 5), () {
+      if (_controller != null && !_controller!.isClosed) {
+        subscribeToSSE(method: method, url: url, header: header, body: body);
+      } else {
+        print("---SKIP RETRY: controller closed---");
+      }
+    });
+  }
+
+  static void unsubscribeFromSSE() async {
+    print("---UNSUBSCRIBE SSE---");
+    await _subscription?.cancel();
+    _subscription = null;
+    _client?.close();
+    _client = null;
+    await _controller?.close();
+    _controller = null;
   }
 }
+
+
